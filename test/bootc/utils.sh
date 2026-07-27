@@ -31,6 +31,11 @@ case "${ID}-${VERSION_ID}" in
     base_image_url="quay.io/centos-bootc/centos-bootc:stream${VERSION_ID}"
     boot_args="uefi,firmware.feature0.name=secure-boot,firmware.feature0.enabled=no"
     ;;
+  rhel-10*)
+    os_variant="rhel10-unknown"
+    base_image_url="${BOOTC_BASE_IMAGE:-registry.redhat.io/rhel10/rhel-bootc:${VERSION_ID}}"
+    boot_args="uefi,firmware.feature0.name=secure-boot,firmware.feature0.enabled=no"
+    ;;
   *)
     log_error "Unsupported distro: ${ID}-${VERSION_ID}"
     exit 1
@@ -38,7 +43,50 @@ case "${ID}-${VERSION_ID}" in
 esac
 
 build_bootc_container() {
-  tee Containerfile >/dev/null <<EOF
+  # For any RHEL host, generate a repo file pointing at the nightly compose so
+  # that the built container image has enabled repos. This is unrelated to
+  # installing go-fdo-client (which never needs repos, whichever path below is
+  # taken) -- it's needed downstream by generate_iso_from_bootc(), since
+  # bootc-image-builder depsolves additional packages (kernel, anaconda, etc.)
+  # from repos baked into the image itself, and unregistered/unentitled RHEL
+  # bootc base images otherwise ship with no enabled repos. The file is
+  # generated at runtime (rather than kept as a static template) so it works
+  # for any RHEL minor version (10.2, 10.3, ...) without code changes.
+  local rhel_repo_file=""
+  if [[ "${ID}" == "rhel" ]] && [ -n "${DOWNLOAD_NODE:-}" ]; then
+    local major_ver="${VERSION_ID%%.*}"  # e.g. "10" from "10.2"
+    rhel_repo_file="files/rhel-${VERSION_ID}.repo"
+    mkdir -p files
+    cat > "${rhel_repo_file}" << EOF
+[RHEL-${VERSION_ID}-NIGHTLY-BaseOS]
+name=baseos
+baseurl=http://${DOWNLOAD_NODE}/rhel-${major_ver}/nightly/RHEL-${major_ver}/latest-RHEL-${VERSION_ID}/compose/BaseOS/\$basearch/os
+enabled=1
+# Nightly compose builds are not GPG-signed; gpgcheck=0 is intentional.
+gpgcheck=0
+sslverify=0
+[RHEL-${VERSION_ID}-NIGHTLY-AppStream]
+name=appstream
+baseurl=http://${DOWNLOAD_NODE}/rhel-${major_ver}/nightly/RHEL-${major_ver}/latest-RHEL-${VERSION_ID}/compose/AppStream/\$basearch/os
+enabled=1
+# Nightly compose builds are not GPG-signed; gpgcheck=0 is intentional.
+gpgcheck=0
+sslverify=0
+EOF
+  fi
+
+  if [ -n "${BREW_CLIENT_RPMS_URL:-}" ]; then
+    # Install go-fdo-client from a specific brew build base path.
+    # BREW_CLIENT_RPMS_URL should point to the version/release directory of the package in brew.
+    # e.g.: https://${BREW_HOST}/${BREW_PACKAGES_DIR}/go-fdo-client/1.0.0/4.el10_2.5
+    tee Containerfile >/dev/null <<EOF
+FROM ${base_image_url}
+# --nogpgcheck and sslverify=false are intentional: internal brew servers
+# use self-signed certificates and builds may not be GPG-signed.
+RUN dnf install -y --nogpgcheck --setopt=sslverify=false $(rpms_from_brew_url "${BREW_CLIENT_RPMS_URL}" | tr '\n' ' ')
+EOF
+  else
+    tee Containerfile >/dev/null <<EOF
 FROM ${base_image_url}
 RUN dnf=\$(readlink \$(command -v dnf)); [ "\${dnf}" = "dnf5" ] || dnf=dnf ; \
     rpm -q --whatprovides \${dnf}'-command(copr)' &> /dev/null || \${dnf} install -y \${dnf}'-command(copr)'; \
@@ -46,6 +94,15 @@ RUN dnf=\$(readlink \$(command -v dnf)); [ "\${dnf}" = "dnf5" ] || dnf=dnf ; \
     \${dnf} install -y go-fdo-client; \
     \${dnf} copr disable -y @fedora-iot/fedora-iot
 EOF
+  fi
+
+  # Append the RHEL repo file into the container image when it was generated.
+  if [ -n "${rhel_repo_file}" ]; then
+    tee -a Containerfile >/dev/null << EOF
+COPY ${rhel_repo_file} /etc/yum.repos.d/rhel-${VERSION_ID}.repo
+EOF
+  fi
+
   podman build --retry=5 --retry-delay=10s -t "fdo-bootc:latest" -f Containerfile .
 }
 
@@ -99,19 +156,28 @@ echo "admin ALL=(ALL) NOPASSWD:ALL" >> /etc/sudoers.d/admin' "${new_ks_file}"
 }
 
 install_server() {
-  if [ ! -v "PACKIT_COPR_RPMS" ]; then
+  if [ -v "PACKIT_COPR_RPMS" ]; then
+    echo "  - Expected RPMs:  ${PACKIT_COPR_RPMS}"
+  elif [ -n "${BREW_SERVER_RPMS_URL:-}" ]; then
+    # Install from a specific brew build base path.
+    # BREW_SERVER_RPMS_URL should point to the version/release directory of the package in brew.
+    # e.g.: https://${BREW_HOST}/${BREW_PACKAGES_DIR}/go-fdo-server/1.0.1/2.el10_2.3
+    # --nogpgcheck and sslverify=false are intentional: internal brew servers
+    # use self-signed certificates and builds may not be GPG-signed.
+    sudo dnf install -y --nogpgcheck --setopt=sslverify=false $(rpms_from_brew_url "${BREW_SERVER_RPMS_URL}")
+  else
     sudo dnf install -y golang make
     commit="$(git rev-parse --short HEAD)"
     rpm -q go-fdo-server | grep -q "go-fdo-server.*git${commit}.*" || {
       make rpm
       sudo dnf install -y rpmbuild/rpms/{noarch,"$(uname -m)"}/*git"${commit}"*.rpm
     }
-  else
-    echo "  - Expected RPMs:  ${PACKIT_COPR_RPMS}"
   fi
-  # Make sure the RPMS are installed
-  installed_rpms=$(rpm -q --qf "%{nvr}.%{arch} " go-fdo-server{,-{manufacturer,owner,rendezvous}})
-  echo "  - Installed RPMs: ${installed_rpms}"
+  installed_rpms=$(rpm -q --qf "%{nvr}.%{arch} " ${go_fdo_server_rpms})
+  log_info "Installed Server RPMs:"
+  for i in ${installed_rpms}; do
+    echo "    ⚙ $i"
+  done
 }
 
 install_client() {

@@ -202,6 +202,9 @@ configure_service_owner() {
   sudo chown -R ${rpm_owner_user}:${rpm_server_group} ${rpm_owner_home_dir}
 }
 
+go_fdo_server_rpms="go-fdo-server go-fdo-server-manufacturer go-fdo-server-owner go-fdo-server-rendezvous"
+go_fdo_client_rpms="go-fdo-client"
+
 install_from_copr() {
   rpm -q --whatprovides 'dnf-command(copr)' &>/dev/null || sudo dnf install -y 'dnf-command(copr)'
   dnf copr list | grep 'fedora-iot/fedora-iot' || sudo dnf copr enable -y @fedora-iot/fedora-iot
@@ -212,9 +215,19 @@ install_from_copr() {
 }
 
 install_client() {
-  # If PACKIT_COPR_RPMS is not defined it means we are running the test
-  # locally so we will install the client from the copr repo
-  [ -v "PACKIT_COPR_RPMS" ] || rpm -q go-fdo-client &>/dev/null || install_from_copr go-fdo-client
+  if [ -v "PACKIT_COPR_RPMS" ]; then
+    : # pre-installed by CI
+  elif [ -n "${BREW_CLIENT_RPMS_URL:-}" ]; then
+    # Install from a specific brew build base path.
+    # BREW_CLIENT_RPMS_URL should point to the version/release directory of the package in brew.
+    # e.g.: https://${BREW_HOST}/${BREW_PACKAGES_DIR}/go-fdo-client/1.0.0/4.el10_2.5
+    # --nogpgcheck and sslverify=false are intentional: internal brew servers
+    # use self-signed certificates and builds may not be GPG-signed.
+    sudo dnf install -y --nogpgcheck --setopt=sslverify=false $(rpms_from_brew_url "${BREW_CLIENT_RPMS_URL}")
+  else
+    # If running locally install the client from the COPR repo
+    rpm -q go-fdo-client &>/dev/null || install_from_copr go-fdo-client
+  fi
   log_info "Installed Client RPM:"
   echo "    ⚙ $(rpm -q go-fdo-client)"
 }
@@ -223,8 +236,9 @@ uninstall_client() {
   # When running a test locally we remove the client package
   # after a successful execution.
   [ -v "PACKIT_COPR_RPMS" ] || {
-    sudo dnf remove -y go-fdo-client
-    sudo dnf copr remove -y @fedora-iot/fedora-iot
+    sudo dnf remove -y ${go_fdo_client_rpms}
+    # Only remove the COPR repo when it was used for installation
+    [ -n "${BREW_CLIENT_RPMS_URL:-}" ] || sudo dnf copr remove -y @fedora-iot/fedora-iot
   }
 }
 
@@ -240,22 +254,29 @@ run_go_fdo_client() {
 }
 
 install_server() {
-  # If PACKIT_COPR_RPMS is not defined it means we are running the test
-  # locally so we will build and install the RPMs from the *committed* code
-  if [ ! -v "PACKIT_COPR_RPMS" ]; then
+  if [ -v "PACKIT_COPR_RPMS" ]; then
+    log_info "Expected Server RPMs:"
+    for i in ${PACKIT_COPR_RPMS}; do
+      echo "    ⚙ $i"
+    done | sort
+  elif [ -n "${BREW_SERVER_RPMS_URL:-}" ]; then
+    # Install from a specific brew build base path.
+    # BREW_SERVER_RPMS_URL should point to the version/release directory of the package in brew.
+    # e.g.: https://${BREW_HOST}/${BREW_PACKAGES_DIR}/go-fdo-server/1.0.1/2.el10_2.3
+    # --nogpgcheck and sslverify=false are intentional: internal brew servers
+    # use self-signed certificates and builds may not be GPG-signed.
+    sudo dnf install -y --nogpgcheck --setopt=sslverify=false $(rpms_from_brew_url "${BREW_SERVER_RPMS_URL}")
+  else
+    # If PACKIT_COPR_RPMS is not defined it means we are running the test
+    # locally so we will build and install the RPMs from the *committed* code
     commit="$(git rev-parse --short HEAD)"
     rpm -q go-fdo-server | grep -q "go-fdo-server.*git${commit}.*" || {
       make rpm
       sudo dnf install -y rpmbuild/rpms/{noarch,"$(uname -m)"}/*git"${commit}"*.rpm
     }
-  else
-    log_info "Expected Server RPMs:"
-    for i in ${PACKIT_COPR_RPMS}; do
-      echo "    ⚙ $i"
-    done | sort
   fi
   # Make sure the RPMS are installed
-  installed_rpms=$(rpm -q --qf "%{nvr}.%{arch} " go-fdo-server{,-{manufacturer,owner,rendezvous}})
+  installed_rpms=$(rpm -q --qf "%{nvr}.%{arch} " ${go_fdo_server_rpms})
   log_info "Installed Server RPMs:"
   for i in ${installed_rpms}; do
     echo "    ⚙ $i"
@@ -263,7 +284,7 @@ install_server() {
 }
 
 uninstall_server() {
-  [ -v "PACKIT_COPR_RPMS" ] || sudo dnf remove -y go-fdo-server{,-manufacturer,-owner,-rendezvous}
+  [ -v "PACKIT_COPR_RPMS" ] || sudo dnf remove -y ${go_fdo_server_rpms}
 }
 
 start_service_manufacturer() {
