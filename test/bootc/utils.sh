@@ -85,6 +85,33 @@ FROM ${base_image_url}
 # use self-signed certificates and builds may not be GPG-signed.
 RUN dnf install -y --nogpgcheck --setopt=sslverify=false $(rpms_from_brew_url "${BREW_CLIENT_RPMS_URL}" | tr '\n' ' ')
 EOF
+  elif [ -n "${COMPOSE_BASE_URL:-}" ]; then
+    # Install go-fdo-client from a compose repository.
+    # Generate per-stream repo files, copy them into the image, install, then remove them.
+    local compose_streams="${COMPOSE_STREAMS:-BaseOS AppStream}"
+    local arch
+    arch=$(uname -m)
+    local compose_base_url="${COMPOSE_BASE_URL%/}"  # strip trailing slash to avoid double slashes in baseurl
+    mkdir -p files
+    local repo_args=""
+    for stream in ${compose_streams}; do
+      local repo_name="compose-${ID}-${VERSION_ID}-${stream}"
+      local repo_file="files/${repo_name}.repo"
+      cat > "${repo_file}" <<EOF
+[${repo_name}]
+name=${repo_name}
+baseurl=${compose_base_url}/${stream}/${arch}/os/
+enabled=1
+gpgcheck=0
+sslverify=0
+EOF
+      repo_args+="COPY ${repo_file} /etc/yum.repos.d/${repo_name}.repo"$'\n'
+    done
+    tee Containerfile >/dev/null <<EOF
+FROM ${base_image_url}
+${repo_args}RUN dnf install -y --disablerepo='*' --enablerepo='compose-*' go-fdo-client && \
+    rm -f /etc/yum.repos.d/compose-*.repo
+EOF
   else
     tee Containerfile >/dev/null <<EOF
 FROM ${base_image_url}
@@ -165,6 +192,8 @@ install_server() {
     # --nogpgcheck and sslverify=false are intentional: internal brew servers
     # use self-signed certificates and builds may not be GPG-signed.
     sudo dnf install -y --nogpgcheck --setopt=sslverify=false $(rpms_from_brew_url "${BREW_SERVER_RPMS_URL}")
+  elif [ -n "${COMPOSE_BASE_URL:-}" ]; then
+    install_from_compose ${go_fdo_server_rpms}
   else
     sudo dnf install -y golang make
     commit="$(git rev-parse --short HEAD)"

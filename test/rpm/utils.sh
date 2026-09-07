@@ -214,6 +214,62 @@ install_from_copr() {
   sudo dnf copr disable -y @fedora-iot/fedora-iot
 }
 
+# Install RPM packages from a compose repository.
+#
+# The compose base URL is read from COMPOSE_BASE_URL. For Fedora and CentOS a
+# reasonable default is computed from /etc/os-release; for RHEL the variable is
+# mandatory. COMPOSE_STREAMS optionally overrides the space-separated list of
+# stream names (repo sub-directories) to enable.
+install_from_compose() {
+  # shellcheck source=/dev/null
+  source /etc/os-release
+  local compose_host compose_id compose_base_url compose_streams
+  case "${ID}-${VERSION_ID}" in
+    fedora-rawhide)
+      compose_host="http://kojipkgs.fedoraproject.org"
+      compose_id="latest-Fedora-${VERSION_ID^}"
+      compose_streams="${COMPOSE_STREAMS:-Everything}"
+      compose_base_url="${COMPOSE_BASE_URL:-${compose_host}/compose/${VERSION_ID}/${compose_id}/compose}"
+      ;;
+    fedora-*)
+      compose_host="http://kojipkgs.fedoraproject.org"
+      compose_streams="${COMPOSE_STREAMS:-Everything}"
+      compose_base_url="${COMPOSE_BASE_URL:-${compose_host}/compose/updates/f${VERSION_ID}-updates/compose}"
+      ;;
+    centos-*)
+      compose_host="https://composes.stream.centos.org"
+      compose_id="latest-CentOS-Stream"
+      compose_streams="${COMPOSE_STREAMS:-BaseOS AppStream}"
+      compose_base_url="${COMPOSE_BASE_URL:-${compose_host}/stream-${VERSION_ID}/production/${compose_id}/compose}"
+      ;;
+    rhel-*)
+      compose_base_url="${COMPOSE_BASE_URL:-}"
+      [ -n "${compose_base_url}" ] || log_error "COMPOSE_BASE_URL must be set for RHEL (e.g. 'http://download.host/.../latest-RHEL-Compose/compose/')"
+      compose_streams="${COMPOSE_STREAMS:-BaseOS AppStream}"
+      ;;
+    *)
+      log_error "install_from_compose: unsupported OS '${ID}-${VERSION_ID}'"
+      ;;
+  esac
+
+  local arch
+  arch=$(uname -m)
+  compose_base_url="${compose_base_url%/}"  # strip trailing slash to avoid double slashes in baseurl
+  for stream in ${compose_streams}; do
+    local repo_name="compose-${ID}-${VERSION_ID}-${stream}"
+    sudo tee "/etc/yum.repos.d/${repo_name}.repo" >/dev/null <<EOF
+[${repo_name}]
+name=${repo_name}
+baseurl=${compose_base_url}/${stream}/${arch}/os/
+enabled=1
+gpgcheck=0
+sslverify=0
+EOF
+  done
+  sudo dnf install --disablerepo='*' --enablerepo="compose-*" -y "$@"
+  sudo rm -f /etc/yum.repos.d/compose-*.repo
+}
+
 install_client() {
   if [ -v "PACKIT_COPR_RPMS" ]; then
     : # pre-installed by CI
@@ -224,6 +280,8 @@ install_client() {
     # --nogpgcheck and sslverify=false are intentional: internal brew servers
     # use self-signed certificates and builds may not be GPG-signed.
     sudo dnf install -y --nogpgcheck --setopt=sslverify=false $(rpms_from_brew_url "${BREW_CLIENT_RPMS_URL}")
+  elif [ -n "${COMPOSE_BASE_URL:-}" ]; then
+    install_from_compose ${go_fdo_client_rpms}
   else
     # If running locally install the client from the COPR repo
     rpm -q go-fdo-client &>/dev/null || install_from_copr go-fdo-client
@@ -238,7 +296,7 @@ uninstall_client() {
   [ -v "PACKIT_COPR_RPMS" ] || {
     sudo dnf remove -y ${go_fdo_client_rpms}
     # Only remove the COPR repo when it was used for installation
-    [ -n "${BREW_CLIENT_RPMS_URL:-}" ] || sudo dnf copr remove -y @fedora-iot/fedora-iot
+    [ -n "${BREW_CLIENT_RPMS_URL:-}" ] || [ -n "${COMPOSE_BASE_URL:-}" ] || sudo dnf copr remove -y @fedora-iot/fedora-iot
   }
 }
 
@@ -266,6 +324,8 @@ install_server() {
     # --nogpgcheck and sslverify=false are intentional: internal brew servers
     # use self-signed certificates and builds may not be GPG-signed.
     sudo dnf install -y --nogpgcheck --setopt=sslverify=false $(rpms_from_brew_url "${BREW_SERVER_RPMS_URL}")
+  elif [ -n "${COMPOSE_BASE_URL:-}" ]; then
+    install_from_compose ${go_fdo_server_rpms}
   else
     # If PACKIT_COPR_RPMS is not defined it means we are running the test
     # locally so we will build and install the RPMs from the *committed* code
