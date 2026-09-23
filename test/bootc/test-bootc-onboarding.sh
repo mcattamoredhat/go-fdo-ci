@@ -213,12 +213,11 @@ case "${ID}-${VERSION_ID}" in
     ;;
 esac
 
-# Building bootc container with go-fdo-client installed
-log_info "Building bootc container with go-fdo-client installed"
-if [[ -z "${PACKIT_COPR_PROJECT:-}" ]]; then
-    log_error "PACKIT_COPR_PROJECT is not set. Cannot install go-fdo-client from Copr."
-    exit 1
-fi
+# Building bootc container with go-fdo-client installed.
+# Product client Packit sets PACKIT_COPR_PROJECT to the PR Copr; go-fdo-ci
+# skip_build jobs use published fedora-iot packages.
+PACKIT_COPR_PROJECT="${PACKIT_COPR_PROJECT:-@fedora-iot/fedora-iot}"
+log_info "Building bootc container with go-fdo-client from ${PACKIT_COPR_PROJECT}"
 tee Containerfile >/dev/null <<EOF
 FROM ${base_image_url}
 RUN dnf install -y 'dnf-command(copr)' && \

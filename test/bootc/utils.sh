@@ -165,13 +165,15 @@ install_server() {
     # --nogpgcheck and sslverify=false are intentional: internal brew servers
     # use self-signed certificates and builds may not be GPG-signed.
     sudo dnf install -y --nogpgcheck --setopt=sslverify=false $(rpms_from_brew_url "${BREW_SERVER_RPMS_URL}")
-  else
+  elif in_server_source_tree; then
     sudo dnf install -y golang make
     commit="$(git rev-parse --short HEAD)"
     rpm -q go-fdo-server | grep -q "go-fdo-server.*git${commit}.*" || {
       make rpm
       sudo dnf install -y rpmbuild/rpms/{noarch,"$(uname -m)"}/*git"${commit}"*.rpm
     }
+  else
+    install_from_copr ${go_fdo_server_rpms}
   fi
   installed_rpms=$(rpm -q --qf "%{nvr}.%{arch} " ${go_fdo_server_rpms})
   log_info "Installed Server RPMs:"

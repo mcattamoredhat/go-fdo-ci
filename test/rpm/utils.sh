@@ -205,13 +205,34 @@ configure_service_owner() {
 go_fdo_server_rpms="go-fdo-server go-fdo-server-manufacturer go-fdo-server-owner go-fdo-server-rendezvous"
 go_fdo_client_rpms="go-fdo-client"
 
-install_from_copr() {
+enable_fedora_iot_copr() {
+  # Match the guest chroot: Fedora is inferred from os-release; CentOS Stream
+  # needs centos-stream-$VERSION_ID (el9 / el10), not a Fedora repo.
   rpm -q --whatprovides 'dnf-command(copr)' &>/dev/null || sudo dnf install -y 'dnf-command(copr)'
-  dnf copr list | grep 'fedora-iot/fedora-iot' || sudo dnf copr enable -y @fedora-iot/fedora-iot
+  if dnf copr list | grep -q 'fedora-iot/fedora-iot'; then
+    return 0
+  fi
+  # shellcheck source=/dev/null
+  . /etc/os-release
+  if [ "${ID}" = "centos" ]; then
+    sudo dnf copr enable -y '@fedora-iot/fedora-iot' "${ID}-stream-${VERSION_ID:-${ID_VERSION}}"
+  else
+    sudo dnf copr enable -y '@fedora-iot/fedora-iot'
+  fi
+}
+
+install_from_copr() {
+  enable_fedora_iot_copr
   # testing-farm-tag-repository is causing problems with builds see:
   # https://docs.testing-farm.io/Testing%20Farm/0.1/test-environment.html#disabling-tag-repository
   sudo dnf install --disablerepo=* --enablerepo=copr:copr.fedorainfracloud.org:group_fedora-iot:fedora-iot -y "$@"
   sudo dnf copr disable -y @fedora-iot/fedora-iot
+}
+
+in_server_source_tree() {
+  local root
+  root="$(git rev-parse --show-toplevel 2>/dev/null || true)"
+  [ -n "${root}" ] && [ -f "${root}/build/package/rpm/go-fdo-server.spec" ]
 }
 
 install_client() {
@@ -266,14 +287,17 @@ install_server() {
     # --nogpgcheck and sslverify=false are intentional: internal brew servers
     # use self-signed certificates and builds may not be GPG-signed.
     sudo dnf install -y --nogpgcheck --setopt=sslverify=false $(rpms_from_brew_url "${BREW_SERVER_RPMS_URL}")
-  else
-    # If PACKIT_COPR_RPMS is not defined it means we are running the test
-    # locally so we will build and install the RPMs from the *committed* code
+  elif in_server_source_tree; then
+    # Local / tmt run inside go-fdo-server: build RPMs from the committed tree.
     commit="$(git rev-parse --short HEAD)"
     rpm -q go-fdo-server | grep -q "go-fdo-server.*git${commit}.*" || {
       make rpm
       sudo dnf install -y rpmbuild/rpms/{noarch,"$(uname -m)"}/*git"${commit}"*.rpm
     }
+  else
+    # go-fdo-ci (or any tests-only tree): no specfile, no Packit artifacts.
+    # Install published packages for this guest's fedora-iot chroot.
+    install_from_copr ${go_fdo_server_rpms}
   fi
   # Make sure the RPMS are installed
   installed_rpms=$(rpm -q --qf "%{nvr}.%{arch} " ${go_fdo_server_rpms})

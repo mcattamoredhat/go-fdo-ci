@@ -2,7 +2,7 @@
 
 Shared CI test repository for [`go-fdo-server`](https://github.com/fido-device-onboard/go-fdo-server) and [`go-fdo-client`](https://github.com/fido-device-onboard/go-fdo-client).
 
-Contains all FMF test plans, test metadata, and test scripts. Packit test jobs in both source repos reference this repo via `fmf_url` so the same test definitions drive CI for both projects.
+Contains all FMF test plans, test metadata, and test scripts. Packit test jobs in both source repos reference this repo via `fmf_url` so the same test definitions drive CI for both projects. Pull requests against **this** repo also run those TMT plans on Testing Farm (`.packit.yaml`, `skip_build: true`) so a change to the shared tests is exercised on the same distro/arch matrix as the products.
 
 ## Repository Structure
 
@@ -27,7 +27,30 @@ test/
 | `test/fmf/plans/bootc-e2e.fmf` | `tag:bootc & tag:server` | Server bootc image test |
 | `test/fmf/plans/e2e.fmf` | `tag:e2e & tag:client` | 2 client E2E onboarding tests |
 | `test/fmf/plans/bootc-onboarding.fmf` | `tag:bootc & tag:client` | Client bootc image test |
-| `test/fmf/plans/coordinated-e2e.fmf` | `tag:coordinated` | Server@PR + client@PR together |
+| `test/fmf/plans/coordinated-e2e.fmf` | `tag:coordinated` | Server@PR + client@PR together (not scheduled on go-fdo-ci PRs) |
+
+## Packit / Testing Farm on go-fdo-ci PRs
+
+GitHub Actions [`e2e.yml`](.github/workflows/e2e.yml) runs native `test/ci` and `test/container` shell tests. It does **not** invoke tmt.
+
+TMT runs through Packit → Testing Farm, using [`.packit.yaml`](.packit.yaml): six `job: tests` entries with `skip_build: true` (this repo has no specfile and does not build RPMs). Guests install published [`@fedora-iot/fedora-iot`](https://copr.fedorainfracloud.org/coprs/g/fedora-iot/fedora-iot/) packages for the guest chroot (Fedora `.fc*` or CentOS Stream `.el9` / `.el10`, matching arch). Product PRs still attach PR Copr artifacts via `PACKIT_COPR_RPMS`; that path is unchanged.
+
+Targets match go-fdo-server / go-fdo-client Packit (24 Testing Farm requests per PR):
+
+| Identifier | Plan | Targets |
+|---|---|---|
+| `rpm-e2e-fedora` | `test/fmf/plans/rpm-e2e` | Fedora latest-stable, latest, rawhide × x86_64+aarch64 |
+| `e2e-fedora` | `test/fmf/plans/e2e` | same Fedora matrix |
+| `bootc-e2e-fedora` | `test/fmf/plans/bootc-e2e` | Fedora latest-stable × x86_64+aarch64 |
+| `bootc-onboarding-fedora` | `test/fmf/plans/bootc-onboarding` | Fedora latest-stable × x86_64+aarch64 |
+| `rpm-e2e-centos` | `test/fmf/plans/rpm-e2e` | CentOS Stream 9 and 10 × x86_64+aarch64 |
+| `e2e-centos` | `test/fmf/plans/e2e` | same CentOS matrix |
+
+Bootc stays on Fedora latest-stable only (product disables rawhide: [HMS-9867](https://issues.redhat.com/browse/HMS-9867), [BZ 2427945](https://bugzilla.redhat.com/show_bug.cgi?id=2427945)). There is no CentOS bootc job.
+
+`coordinated-e2e` is not a Packit job on this repo.
+
+These checks appear only after the Packit GitHub App is installed and allowlisted for `fido-device-onboard/go-fdo-ci` (same org setup as the product repos). Until then `.packit.yaml` has no effect.
 
 ---
 
